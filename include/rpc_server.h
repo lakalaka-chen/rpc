@@ -4,33 +4,18 @@
 #include <type_traits>
 #include <functional>
 #include <unordered_map>
+#include <mutex>
 
 namespace rpc {
 
 using tcp::TcpServer;
 
 
-class BaseCommand {
-public:
-    virtual ~BaseCommand() = default;
-};
-
-template <class... ArgTypes>
-class Command : public BaseCommand {
-    typedef std::function<void(ArgTypes...)> FuncType;
-    FuncType f_;
-public:
-    Command() {}
-    Command(FuncType f) : f_(f) {}
-    void operator()(ArgTypes... args) { if(f_) f_(args...); }
-};
-
-
 class RpcServer: public TcpServer {
 private:
-    typedef std::shared_ptr<BaseCommand> BaseCommandPtr;
-    typedef std::unordered_map<std::string, BaseCommandPtr> FMap;
-    FMap procedures_;
+    using ErasedType = void(*)();
+    std::unordered_map<std::string, ErasedType> funcs_;
+    std::mutex mu_;
 
 public:
     explicit RpcServer(const std::string& name, uint16_t port);
@@ -38,33 +23,32 @@ public:
     RpcServer& operator=(const RpcServer&) = delete;
     ~RpcServer() override;
 
-    template<typename Func>
-    bool Register(const std::string& name, const Func &f, bool force_cover=false);
-
-    template <class... ArgTypes>
-    void Execute(const std::string& name, ArgTypes&&... args) {
-        using TmpType = typename std::remove_reference<ArgTypes...>::type;
-//        typedef Command<ArgTypes...> CommandType;
-        typedef Command<TmpType> CommandType;
-        auto it = procedures_.find(name);
-        if(it != procedures_.end()) {
-            CommandType* c = dynamic_cast<CommandType*>(it->second.get());
-            if(c) {
-                (*c)(std::forward<ArgTypes>(args)...);
-//                (*c)(args...);
-            }
+    template <typename... Args>
+    bool Register(const std::string &name, void(*func)(Args...)) {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (funcs_.find(name) != funcs_.end()) {
+            return false;
         }
+        funcs_[name] = reinterpret_cast<ErasedType>(func);
+        return true;
     }
 
-    bool Start() override;
+    template <typename... Args>
+    bool Call(const std::string &name, Args... args) {
+        std::lock_guard<std::mutex> lock(mu_);
+        using FuncType = void(*)(Args...);
+        auto it = funcs_.find(name);
+        if (it == funcs_.end()) {
+            return false;
+        }
+        auto func = reinterpret_cast<FuncType>(it->second);
+        func(args...);
+        return true;
+    }
+
+//    bool Start() override;
 
 };
-
-template<typename T>
-bool RpcServer::Register(const std::string& name, const T &f, bool force_cover) {
-    procedures_.insert({name, BaseCommandPtr(new T(f))});
-    return true;
-}
 
 
 }
