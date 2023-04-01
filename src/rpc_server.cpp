@@ -17,6 +17,7 @@ RpcServer::RpcServer(const std::string& name, uint16_t port)
 }
 
 RpcServer::~RpcServer() {
+    Close();
     if (main_thread_.joinable()) {
         spdlog::info("{} is joining...", name_);
         main_thread_.join();
