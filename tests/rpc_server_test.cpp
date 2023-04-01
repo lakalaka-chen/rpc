@@ -6,154 +6,129 @@
 
 #include <thread>
 #include <vector>
+#include <future>
 #include <mutex>
 #include <atomic>
 #include <iostream>
 #include <sstream>
 
-namespace rpc {
+using namespace rpc;
 
-
+using RpcServerPtr = std::shared_ptr<RpcServer>;
+using ServerPtrFuture = std::future<RpcServerPtr>;
 
 
 class RpcServerTest: public testing::Test {
 public:
-    static const uint16_t port = 9999;
-    RpcServerTest(): rpc_server_(new RpcServer("Rpc Server", port)) {
-        rpc_server_->Start();
-        rpc_server_->HandleReceiveData([&](const std::string &recv_msg, std::string & reply_msg){
-            std::istringstream is(recv_msg);
-            std::string method;
-            uint32_t term, index;
-            std::string content;
-            is >> method;
-            if (method == "AppendEntries") {
-                is >> term >> index >> content;
-                std::lock_guard<std::mutex> lock(mu_);
-                rpc_server_->Call(method, term, index, content, this);
-                reply_msg = "ok";
-            } else {
-                reply_msg = "ERROR: " + recv_msg+" not found.";
-            }
-        });
-
-        rpc_server_->Register("AppendEntries", +[](uint32_t term, uint32_t index, const std::string &content, RpcServerTest *node){
-            node->terms_.push_back(term);
-            node->indexes_.push_back(index);
-            node->contents_.push_back(content);
-        });
-    }
-    ~RpcServerTest() {
-        if (rpc_server_) {
-            rpc_server_->Close();
-        }
-    }
-
-public:
-    std::shared_ptr<RpcServer> rpc_server_;
+    ServerPtrFuture fu_;
     std::vector<uint32_t> terms_;
     std::vector<uint32_t> indexes_;
     std::vector<std::string> contents_;
     std::mutex mu_;
+    RpcServerPtr server_ptr_;
+    uint16_t port_;
+
+    RpcServerTest() {
+
+        port_ = static_cast<uint16_t>( rand() % (5200 - 1200) ) + 1200;
+
+        spdlog::set_level(spdlog::level::debug);
+        spdlog::info("It is initializing. ");
+
+        auto create_server = [this](uint16_t port){
+            RpcServerPtr server_ptr = std::make_shared<RpcServer>("Rpc Server", port);
+            server_ptr->Start();
+            server_ptr->Register("Echo", [](const std::string &recv, std::string &reply){
+                reply = recv;
+            });
+            server_ptr->Register("Store", [&](uint32_t term, uint32_t index, const std::string &content){
+                std::lock_guard<std::mutex> lock(mu_);
+                terms_.push_back(term);
+                indexes_.push_back(index);
+                contents_.push_back(content);
+            });
+            server_ptr->Register("Add", [](int &a, int &b, int &c) {
+                c = a+b;
+            });
+            server_ptr->HandleReceiveData([server_ptr](const std::string &recv, std::string &reply){
+                std::istringstream is(recv);
+                std::string method;
+                is >> method;
+                try {
+                    if (method == "Echo") {
+                        std::string recv_str;
+                        is >> recv_str;
+                        server_ptr->Call<const std::string&, std::string&>("Echo", std::ref(recv_str), std::ref(reply));
+                    } else if (method == "Add") {
+                        int a, b, c;
+                        is >> a >> b;
+                        server_ptr->Call<int&,int&,int&>("Add", a, b, std::ref(c));
+                        reply = std::to_string(c);
+                    } else if (method == "Store") {
+                        uint32_t term, index;
+                        std::string content;
+                        is >> term >> index >> content;
+                        server_ptr->Call<uint32_t, uint32_t, const std::string&>("Store", std::move(term), std::move(index), std::ref(content));
+                        reply = "ok";
+                    }
+                } catch (const std::exception &e) {
+                    spdlog::error("{}", e.what());
+                }
+            });
+            return server_ptr;
+        };
+        fu_ = std::async(create_server, port_);
+    }
 
 };
 
-TEST_F(RpcServerTest, AppendEntriesTest) {
 
-    std::mutex close_mu;
-    std::condition_variable close_cv;
-    bool to_close = false;
+TEST_F(RpcServerTest, TestEcho) {
+
+    tcp::TcpClient client;
+    client.ConnectTo("127.0.0.1", port_);
+    std::string send_msg = "Echo nihao";
+    std::string recv_msg;
+    ASSERT_EQ(true, client.SendMsg(send_msg));
+    ASSERT_EQ(true, client.RecvMsg(&recv_msg));
+    ASSERT_EQ(recv_msg, send_msg.substr(5));
+}
+
+
+TEST_F(RpcServerTest, TestAdd) {
+
+    tcp::TcpClient client;
+    client.ConnectTo("127.0.0.1", port_);
+    int a = 1;
+    int b = 2;
+
+    std::string send_msg = std::string("Add") + " " + std::to_string(a) + " " + std::to_string(b);
+    std::string recv_msg;
+    ASSERT_EQ(true, client.SendMsg(send_msg));
+    ASSERT_EQ(true, client.RecvMsg(&recv_msg));
+    ASSERT_EQ(a+b, std::stoi(recv_msg));
+}
+
+
+TEST_F(RpcServerTest, TestStore) {
+
+    tcp::TcpClient client;
+    client.ConnectTo("127.0.0.1", port_);
     uint32_t term = 1;
-    uint32_t index = 1;
-    std::string content = "hello";
-    std::thread client([&](){
-        std::unique_lock<std::mutex> lock(close_mu);
-        tcp::TcpClient client;
-        client.ConnectTo("127.0.0.1", RpcServerTest::port);
-        std::string recv_msg;
-        std::string send_msg = std::string("AppendEntries") + " " + std::to_string(term) + " " + std::to_string(index) + " " + content;
-        client.SendMsg(send_msg);
-        client.RecvMsg(&recv_msg);
-        spdlog::info(recv_msg);
-        to_close = true;
-        close_cv.notify_one();
-    });
-    client.join();
+    uint32_t index = 2;
+    std::string content = "store_test";
 
-    std::unique_lock<std::mutex> lock(close_mu);
-    while (!to_close) {
-        close_cv.wait(lock);
-    }
+    std::string send_msg = std::string("Store") + " " + std::to_string(term) + " " + std::to_string(index) + " " + content;
+    std::string recv_msg;
+    ASSERT_EQ(true, client.SendMsg(send_msg));
+    ASSERT_EQ(true, client.RecvMsg(&recv_msg));
+    ASSERT_EQ("ok", recv_msg);
 
-    ASSERT_EQ(terms_.size(), 1);
-    ASSERT_EQ(indexes_.size(), 1);
-    ASSERT_EQ(contents_.size(), 1);
-
-    ASSERT_EQ(terms_.back(), term);
-    ASSERT_EQ(indexes_.back(), index);
-    ASSERT_EQ(contents_.back(), content);
-
-}
-
-
-TEST_F(RpcServerTest, ConcurrentAppendEntriesTest) {
-
-    int N = 100;
-    std::atomic<int> client_existing{N};
-
-    for (int i = 0; i < N; i ++) {
-        uint32_t term = i;
-        uint32_t index = i;
-        std::string content = "hello" + std::to_string(i);
-        std::thread client([term, index, content, &client_existing](){
-            tcp::TcpClient client;
-            client.ConnectTo("127.0.0.1", RpcServerTest::port);
-            std::string recv_msg;
-            std::string send_msg = std::string("AppendEntries") + " " + std::to_string(term) + " " + std::to_string(index) + " " + content;
-            client.SendMsg(send_msg);
-            client.RecvMsg(&recv_msg);
-            spdlog::info(recv_msg);
-            client_existing.fetch_sub(1);
-        });
-        client.join();
-    }
-
-    while (client_existing.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-
-
-    ASSERT_EQ(terms_.size(), N);
-    ASSERT_EQ(indexes_.size(), N);
-    ASSERT_EQ(contents_.size(), N);
-
-}
-
-
-TEST(HELLO_TEST, TEST1) {
-    spdlog::set_level(spdlog::level::debug);
-    uint16_t port = 2222;
-    rpc::RpcServer server("RPC SERVER 001", port);
-    server.Register("Echo", +[](const std::string &recv, std::string &reply){
-        reply = std::string("Hello I received: ") + recv;
-    });
-    server.HandleReceiveData([&server](const std::string &recv, std::string &reply){
-        server.Call("Echo", recv, std::ref(reply));
-    });
-    server.Start();
-
-    std::thread client([&](){
-        tcp::TcpClient client;
-        client.ConnectTo("127.0.0.1", port);
-        std::string recv_msg;
-        std::string send_msg = "client 001";
-        client.SendMsg(send_msg);
-        client.RecvMsg(&recv_msg);
-        spdlog::info(recv_msg);
-    });
-    client.join();
-}
-
-
-
+    std::unique_lock<std::mutex> lock(mu_);
+    ASSERT_EQ(1, terms_.size());
+    ASSERT_EQ(1, indexes_.size());
+    ASSERT_EQ(1, contents_.size());
+    ASSERT_EQ(term, terms_.back());
+    ASSERT_EQ(index, indexes_.back());
+    ASSERT_EQ(content, contents_.back());
 }
