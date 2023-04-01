@@ -1,3 +1,4 @@
+#pragma once
 
 #include "tcp/tcp_server.h"
 #include <typeinfo>
