@@ -7,6 +7,7 @@
 #include <thread>
 #include <vector>
 #include <mutex>
+#include <atomic>
 #include <iostream>
 #include <sstream>
 
@@ -17,7 +18,7 @@ namespace rpc {
 
 class RpcServerTest: public testing::Test {
 public:
-    static const uint16_t port = 8888;
+    static const uint16_t port = 9999;
     RpcServerTest(): rpc_server_(new RpcServer("Rpc Server", port)) {
         rpc_server_->Start();
         rpc_server_->HandleReceiveData([&](const std::string &recv_msg, std::string & reply_msg){
@@ -92,6 +93,65 @@ TEST_F(RpcServerTest, AppendEntriesTest) {
     ASSERT_EQ(indexes_.back(), index);
     ASSERT_EQ(contents_.back(), content);
 
+}
+
+
+TEST_F(RpcServerTest, ConcurrentAppendEntriesTest) {
+
+    int N = 100;
+    std::atomic<int> client_existing{N};
+
+    for (int i = 0; i < N; i ++) {
+        uint32_t term = i;
+        uint32_t index = i;
+        std::string content = "hello" + std::to_string(i);
+        std::thread client([term, index, content, &client_existing](){
+            tcp::TcpClient client;
+            client.ConnectTo("127.0.0.1", RpcServerTest::port);
+            std::string recv_msg;
+            std::string send_msg = std::string("AppendEntries") + " " + std::to_string(term) + " " + std::to_string(index) + " " + content;
+            client.SendMsg(send_msg);
+            client.RecvMsg(&recv_msg);
+            spdlog::info(recv_msg);
+            client_existing.fetch_sub(1);
+        });
+        client.join();
+    }
+
+    while (client_existing.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+
+    ASSERT_EQ(terms_.size(), N);
+    ASSERT_EQ(indexes_.size(), N);
+    ASSERT_EQ(contents_.size(), N);
+
+}
+
+
+TEST(HELLO_TEST, TEST1) {
+    spdlog::set_level(spdlog::level::debug);
+    uint16_t port = 2222;
+    rpc::RpcServer server("RPC SERVER 001", port);
+    server.Register("Echo", +[](const std::string &recv, std::string &reply){
+        reply = std::string("Hello I received: ") + recv;
+    });
+    server.HandleReceiveData([&server](const std::string &recv, std::string &reply){
+        server.Call("Echo", recv, std::ref(reply));
+    });
+    server.Start();
+
+    std::thread client([&](){
+        tcp::TcpClient client;
+        client.ConnectTo("127.0.0.1", port);
+        std::string recv_msg;
+        std::string send_msg = "client 001";
+        client.SendMsg(send_msg);
+        client.RecvMsg(&recv_msg);
+        spdlog::info(recv_msg);
+    });
+    client.join();
 }
 
 

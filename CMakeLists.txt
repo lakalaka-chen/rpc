@@ -28,9 +28,13 @@ file(GLOB_RECURSE SOURCE_FILES "${PROJECT_SOURCE_DIR}/src/*.cpp")
 # set(INCLUDE_FILES "include/*.h")
 # set(SOURCE_FILES src/*.cpp)
 
-add_library(${PROJECT_NAME}
+add_library(${PROJECT_NAME} STATIC
         ${INCLUDE_FILES}
         ${SOURCE_FILES})
+
+#add_library(${PROJECT_NAME}D SHARED
+#        ${INCLUDE_FILES}
+#        ${SOURCE_FILES})
 
 add_subdirectory(tests)
 add_subdirectory(third_party)
